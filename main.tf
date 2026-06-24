@@ -96,3 +96,13 @@ resource "aws_iam_role_policy_attachment" "lambda_dynamodb_access" {
   role = aws_iam_role.lambda_execution.name
   policy_arn = aws_iam_policy.dynamodb_access.arn
 }
+
+#CloudWatch
+resource "aws_cloudwatch_log_group" "lambda_logs" {
+  name = "/aws/lambda/${local.name_prefix}-${local.name_surfix}"
+  retention_in_days = 14
+  tags = merge(local.common_tags,{
+    Name = "${local.name_prefix}-${local.name_surfix}"
+  })
+}
+
