@@ -1,4 +1,5 @@
 
+data "aws_region" "current" {}
 
 resource "random_id" "aws_suffix" {
   byte_length = 3
@@ -7,6 +8,8 @@ resource "random_id" "aws_suffix" {
 locals {
   name_prefix = "url_shotener-dev"
   name_surfix = random_id.aws_suffix
+
+   enable_cors = true
 
   common_tags = merge(
     {
@@ -258,12 +261,16 @@ resource "local_file" "lambda_code" {
    EOF
 }
 
+//create deployment package
+data "archive_file" "lambda_zip"{
+  type = "zip"
+  source_file = local_file.lambda_code.filename
+  output_path = "${path.module}/lambda_function.ts"
+  depends_on = [ local_file.lambda_code ]
+}
 
 
-
-
-
-//iam role and permissions for lambda
+//Lambda execution role
 resource "aws_iam_role" "lambda_execution" {
   name = "${local.name_prefix}-lambda-role-${local.name_surfix}"
   assume_role_policy = jsonencode({
@@ -279,10 +286,14 @@ resource "aws_iam_role" "lambda_execution" {
 tags = local.common_tags
 }
 
+//Attach  lambda role execution policy
+
 resource "aws_iam_role_policy_attachment" "lambda_execution_policy_attachement" {
   role = aws_iam_role.lambda_execution.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
+
+# Custom policy for DynamoDB access
 
 resource "aws_iam_policy" "dynamodb_access" {
    name = "${local.name_prefix}-dynamodb-plicy-${local.name_surfix}"
@@ -305,17 +316,146 @@ resource "aws_iam_policy" "dynamodb_access" {
    tags = local.common_tags
 }
 
+//Attach DynamoDB policy to lambda role
+
 resource "aws_iam_role_policy_attachment" "lambda_dynamodb_access" {
   role = aws_iam_role.lambda_execution.name
   policy_arn = aws_iam_policy.dynamodb_access.arn
 }
 
-#CloudWatch
+//CloudWatch
+
 resource "aws_cloudwatch_log_group" "lambda_logs" {
   name = "/aws/lambda/${local.name_prefix}-${local.name_surfix}"
   retention_in_days = 14
   tags = merge(local.common_tags,{
     Name = "${local.name_prefix}-${local.name_surfix}"
+  })
+}
+
+//Lambda function
+
+resource "aws_lambda_function" "url_shotener" {
+  filename =  data.archive_file.lambda_zip.output_path
+  function_name = "${local.name_prefix}-${local.name_surfix}"
+  role = aws_iam_role.lambda_execution.arn
+  handler = "lambda_function.handler"
+  source_code_hash = data.archive_file.lambda_zip.output_base64sha256
+  runtime = "nodejs22.x"
+  timeout = 30
+  memory_size = 256
+  description = "URL shortener service function"
+
+  environment {
+    variables = {
+      TABLE_NAME = aws_dynamodb_table.url_storage.name
+      URL_EXPIRATION_DAYS = 30
+      API_URL = "https://${aws_apigatewayv2_api.url_shotener.id}.execute-api.${data.aws_region.current.name}.amazonaws.com/prod"
+    }
+  }
+
+  depends_on = [ 
+    aws_cloudwatch_log_group.lambda_logs,
+    aws_iam_role_policy_attachment.lambda_dynamodb_access,
+    aws_aws_iam_role_policy_attachment.lambda_execution_policy_attachement
+
+   ]
+
+  tags = merge(
+    local.common_tags,
+    {
+     Name = "${local.name_prefix}-function-${local.name_surfix}"
+    }
+  )
+}
+
+//Api gateway http api
+
+resource "aws_apigatewayv2_api" "url_shotener" {
+  name = "${local.name_prefix}-api-${local.name_surfix}"
+  protocol_type = "HTTP"
+  description = "Url shortener api"
+
+  dynamic "cors_configuration" {
+    for_each = local.enable_cors ? [1] : []
+    content {
+      allow_credentials = false
+      allow_methods = ["GET","POST","OPTIONS"]
+      allow_origins = ["*"]
+      allow_headers = [
+        "Content-Type",
+        "X-Amz-Date",
+        "Authorization",
+        "X-Api-Key", 
+        "X-Amz-Security-Token"
+        ]
+      max_age = 300
+    }
+  }
+   tags = merge(local.common_tags,{
+    Name = "${local.name_prefix}-api-${local.name_surfix}"
+  })
+}
+
+//Api gateway integration with Lambda
+
+resource "aws_apigatewayv2_integration" "lambda_integration" {
+  api_id = aws_apigatewayv2_api.url_shotener.id
+  integration_type = "AWS_PROXY"
+  integration_uri = aws_lambda_function.url_shotener.invoke_arn
+  payload_format_version = "1.0"
+  depends_on = [ aws_lambda_function.url_shotener ]
+}
+
+//Routes for url shortening (POST /shorten)
+
+resource "aws_apigatewayv2_route" "shorten_url" {
+  api_id = aws_apigatewayv2_api.url_shotener.id
+  route_key = "POST /shorten"
+  target = "integration/${aws_apigatewayv2_integration.lambda_integration.id}"
+}
+
+//Routes for url redirection (GET /{proxy+})
+
+resource "aws_apigatewayv2_route" "shorten_url" {
+  api_id = aws_apigatewayv2_api.url_shotener.id
+  route_key = "POST /{proxy+}"
+  target = "integration/${aws_apigatewayv2_integration.lambda_integration.id}"
+}
+
+//Api gateway stage
+resource "aws_apigatewayv2_stage" "prod" {
+  api_id = aws_apigatewayv2_api.url_shotener.id
+  name = "prod"
+  description = "Production stage"
+  auto_deploy = true
+
+  access_log_settings {
+    destination_arn = aws_cloudwatch_log_group.lambda_logs.arn
+    format = jsondecode({
+       requestId      = "$context.requestId"
+      requestTime    = "$context.requestTime"
+      httpMethod     = "$context.httpMethod"
+      routeKey       = "$context.routeKey"
+      status         = "$context.status"
+      responseLength = "$context.responseLength"
+      requestLength  = "$context.requestLength"
+      ip             = "$context.identity.sourceIp"
+      userAgent      = "$context.identity.userAgent"
+    })
+  }
+
+  tags = local.common_tags
+  depends_on = [aws_cloudwatch_log_group.lambda_logs]
+}
+
+//Cloudwatch log group for api gateway
+
+resource "aws_cloudwatch_log_group" "api_gateway_logs"{
+ name = "aws/apigateway/${local.name_prefix}-${local.name_surfix}"
+ retention_in_days = 14
+ tags = merge(local.common_tags,{
+    Name = "${local.name_prefix}-api-${local.name_surfix}"
   })
 }
 
