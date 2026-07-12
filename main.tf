@@ -9,7 +9,8 @@ locals {
   name_prefix = "url_shotener-dev"
   name_surfix = random_id.aws_suffix
 
-   enable_cors = true
+  enable_cors = true
+  enable_cloudwatch_dashboard = true
 
   common_tags = merge(
     {
@@ -297,7 +298,7 @@ resource "aws_iam_role_policy_attachment" "lambda_execution_policy_attachement" 
 
 resource "aws_iam_policy" "dynamodb_access" {
    name = "${local.name_prefix}-dynamodb-plicy-${local.name_surfix}"
-   description = "IAM policy for DynamoDB access from lambda "
+   description = "IAM policy for DynamoDB access from lambda"
    policy = jsondecode({
       Version = "2012-10-17"
       Statement = {
@@ -329,7 +330,7 @@ resource "aws_cloudwatch_log_group" "lambda_logs" {
   name = "/aws/lambda/${local.name_prefix}-${local.name_surfix}"
   retention_in_days = 14
   tags = merge(local.common_tags,{
-    Name = "${local.name_prefix}-${local.name_surfix}"
+    Name = "${local.name_prefix}cloud-watch${local.name_surfix}"
   })
 }
 
@@ -357,8 +358,7 @@ resource "aws_lambda_function" "url_shotener" {
   depends_on = [ 
     aws_cloudwatch_log_group.lambda_logs,
     aws_iam_role_policy_attachment.lambda_dynamodb_access,
-    aws_aws_iam_role_policy_attachment.lambda_execution_policy_attachement
-
+    aws_iam_role_policy_attachment.lambda_execution_policy_attachement
    ]
 
   tags = merge(
@@ -433,7 +433,7 @@ resource "aws_apigatewayv2_stage" "prod" {
   access_log_settings {
     destination_arn = aws_cloudwatch_log_group.lambda_logs.arn
     format = jsondecode({
-       requestId      = "$context.requestId"
+      requestId      = "$context.requestId"
       requestTime    = "$context.requestTime"
       httpMethod     = "$context.httpMethod"
       routeKey       = "$context.routeKey"
@@ -459,3 +459,80 @@ resource "aws_cloudwatch_log_group" "api_gateway_logs"{
   })
 }
 
+// Lambda Permission for API Gateway
+
+resource "aws_lambda_permission" "api_gateway_invoke" {
+  statement_id = "AllowExecutionFromAPIGateway"
+  action = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.url_shotener.function_name
+  principal = "apigateway.amazonaws.com"
+  source_arn = "${aws_apigatewayv2_api.url_shotener.execution_arn}"
+}
+
+//CloudWatch Dashboard
+
+resource "aws_cloudwatch_dashboard" "url_shotener" {
+  count = local.enable_cloudwatch_dashboard ? 1 : 0
+  dashboard_name = "${local.name_prefix}-dahsboard-${local.name_surfix}"
+  dashboard_body = jsondecode({
+    widgets = [
+      {
+        type = "metric"
+        x = 0
+        y = 0
+        widgets = 12
+        height = 6
+        properties = {
+          metric = [
+            ["AWS/Lambda", "Invocation", "FunctionName", aws_lambda_function.url_shotener.function_name],
+            [".","Errors",".","."],
+            [".","Duration",".","."]
+          ]
+          period = 300
+          stat = "Average"
+          title = "Lambda Function Metrics"
+          view = "timeSeries"
+        }
+      },
+      {
+        type = "metric"
+        x = 12
+        y = 0
+        widgets = 12
+        height = 6
+
+        properties = {
+          metric = [
+            ["AWS/DynamoDB", "ConsumedReadCapacityUnits", "TableName",aws_dynamodb_table.url_storage],
+            [".","ConsumedWriteCapacityUnits",".","."],
+          ]
+          period = 300
+          stat = "Sum"
+          title = "DynamoDB Table Metrics"
+          view = "timeSeries"
+        }
+      },
+      {
+        type = "metric"
+        x = 0
+        y = 6
+        widgets = 24
+        height = 6
+
+        properties = {
+          metric = [
+            ["AWS/ApiGatewayV2", "Count", "ApiId", aws_apigatewayv2_api.url_shotener],
+            [".","IntegrationLatency",".","."],
+            [".","Latency",".","."],
+          ]
+          period = 300
+          stat = "Average"
+          region = data.aws_region.current.name
+          title = "API Gateway Metrics"
+          view = "timeSeries"
+        }
+      }
+    ]
+  })
+
+}
