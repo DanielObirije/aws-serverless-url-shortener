@@ -18,12 +18,12 @@ terraform {
     }
   }
 }
-provider "aws" {
-  default_tags {
-    tags = {
-      Project     = "URLShortener"
-      Environment = "dev"
-      ManagedBy   = "Terraform"
-    }
-  }
-}
+# provider "aws" {
+#   default_tags {
+#     tags = {
+#       Project     = "URLShortener"
+#       Environment = "dev"
+#       ManagedBy   = "Terraform"
+#     }
+#   }
+# }

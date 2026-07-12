@@ -7,7 +7,7 @@ resource "random_id" "aws_suffix" {
 
 locals {
   name_prefix = "url_shotener-dev"
-  name_surfix = random_id.aws_suffix
+  name_surfix = random_id.aws_suffix.hex
 
   enable_cors = true
   enable_cloudwatch_dashboard = true
@@ -156,7 +156,7 @@ resource "local_file" "lambda_code" {
         },
         body: JSON.stringify({
           short_id: shortId,
-          short_url: `${apiUrl}/${shortId}`,
+          short_url: `$${apiUrl}/$${shortId}`,
           original_url: originalUrl,
           expires_at: expirationTime.toISOString(),
         }),
@@ -238,10 +238,10 @@ resource "local_file" "lambda_code" {
   function generateShortId(url: string) {
     const timestamp = new Date().toISOString();
     const uuidStr = crypto.randomUUID().replace(/-/g, "").substring(0, 8);
-    const hashInput = `${url}${timestamp}${uuidStr}`;
+    const hashInput = `$${url}$${timestamp}$${uuidStr}`;
     const hashHex = crypto.createHash("sha256").update(hashInput).digest("hex");
     const hexPrefix = hashHex.substring(0, 16);
-    const num = BigInt(`0x${hexPrefix}`);
+    const num = BigInt(`0x$${hexPrefix}`);
     return base62Encode(num).substring(0, 8);
   }
 
@@ -263,6 +263,7 @@ resource "local_file" "lambda_code" {
 }
 
 //create deployment package
+
 data "archive_file" "lambda_zip"{
   type = "zip"
   source_file = local_file.lambda_code.filename
@@ -299,7 +300,7 @@ resource "aws_iam_role_policy_attachment" "lambda_execution_policy_attachement" 
 resource "aws_iam_policy" "dynamodb_access" {
    name = "${local.name_prefix}-dynamodb-plicy-${local.name_surfix}"
    description = "IAM policy for DynamoDB access from lambda"
-   policy = jsondecode({
+   policy = jsonencode({
       Version = "2012-10-17"
       Statement = {
         Effect = "Allow"
@@ -417,7 +418,7 @@ resource "aws_apigatewayv2_route" "shorten_url" {
 
 //Routes for url redirection (GET /{proxy+})
 
-resource "aws_apigatewayv2_route" "shorten_url" {
+resource "aws_apigatewayv2_route" "redirect_url" {
   api_id = aws_apigatewayv2_api.url_shotener.id
   route_key = "POST /{proxy+}"
   target = "integration/${aws_apigatewayv2_integration.lambda_integration.id}"
@@ -432,7 +433,7 @@ resource "aws_apigatewayv2_stage" "prod" {
 
   access_log_settings {
     destination_arn = aws_cloudwatch_log_group.lambda_logs.arn
-    format = jsondecode({
+    format = jsonencode({
       requestId      = "$context.requestId"
       requestTime    = "$context.requestTime"
       httpMethod     = "$context.httpMethod"
@@ -474,7 +475,7 @@ resource "aws_lambda_permission" "api_gateway_invoke" {
 resource "aws_cloudwatch_dashboard" "url_shotener" {
   count = local.enable_cloudwatch_dashboard ? 1 : 0
   dashboard_name = "${local.name_prefix}-dahsboard-${local.name_surfix}"
-  dashboard_body = jsondecode({
+  dashboard_body = jsonencode({
     widgets = [
       {
         type = "metric"
